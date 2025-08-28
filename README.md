@@ -28,3 +28,16 @@ python setup.py install
 ```
 - Test the paddle
 python ppdet/modeling/tests/test_architectures.py
+
+
+- Test infer
+```
+# Bash
+python tools/infer.py -c configs/ppyoloe/ppyoloe_plus_crn_s_80e_coco.yml \
+                      --infer_img=demo/000000014439.jpg \
+                      --output_dir=infer_output/ \
+                      --draw_threshold=0.5 \
+
+# One Line
+python tools/infer.py -c configs/ppyoloe/ppyoloe_plus_crn_s_80e_coco.yml --infer_img=demo/000000014439.jpg --output_dir=infer_output/ --draw_threshold=0.5
+```
