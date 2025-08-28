@@ -27,8 +27,9 @@ pip install -r requirements.txt
 python setup.py install
 ```
 - Test the paddle
+```
 python ppdet/modeling/tests/test_architectures.py
-
+```
 
 - Test infer
 ```
