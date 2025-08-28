@@ -1,3 +1,4 @@
+
 import os
 import cv2
 import json
@@ -83,7 +84,7 @@ lineA = ast.literal_eval(os.getenv("lineA"))
 lineB = ast.literal_eval(os.getenv("lineB"))
 
 # Detection region parameters
-DETECTION_MARGIN = 150
+DETECTION_MARGIN = 60
 DETECTION_Y_MIN = min(lineA[0][1], lineB[0][1]) - DETECTION_MARGIN
 DETECTION_Y_MAX = max(lineA[1][1], lineB[1][1]) + DETECTION_MARGIN
 
@@ -551,7 +552,7 @@ def main():
     logging.info(f"Image crop settings - Padding: {CROP_PADDING}px, Min size: {MIN_CROP_SIZE}, Quality: {JPEG_QUALITY}%")
     
     rtsp_url = RTSP_URL
-    model = YOLO("yolo11l.pt")
+    model = YOLO("yolo11x.pt")
     names = model.names
 
     last_waiting_log = time.time()
@@ -585,7 +586,7 @@ def main():
                     raise Exception("Frame read error or RTSP stream disconnected")
 
                 # Screen Resolution
-                frame = cv2.resize(frame, (1920, 1080))
+                frame = cv2.resize(frame, (1280, 720))
 
                 # Create cropped frame for YOLO detection (only the detection region)
                 detection_frame = frame[DETECTION_Y_MIN:DETECTION_Y_MAX, :]
