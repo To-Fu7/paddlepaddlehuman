@@ -60,9 +60,9 @@ PG_PORT = int(os.getenv('PG_PORT', 5432))
 PG_DB = os.getenv('PG_DB')
 PG_USER = os.getenv('PG_USER')
 PG_PASS = os.getenv('PG_PASS')
-device_id = 'HIJK'
-device_code = 'ABCD'
-device_name = 'DEFG'
+device_id = os.getenv('DEVICE_ID', 'HIJK')
+device_code = os.getenv('DEVICE_CODE', 'ABCD')
+device_name = os.getenv('DEVICE_NAME', 'DEFG')
 
 # MQTT Configuration
 MQTT_BROKER = os.getenv('MQTT_BROKER', 'localhost')
@@ -70,7 +70,7 @@ MQTT_PORT = int(os.getenv('MQTT_PORT', 1883))
 MQTT_USERNAME = os.getenv('MQTT_USERNAME')
 MQTT_PASSWORD = os.getenv('MQTT_PASSWORD')
 MQTT_TOPIC = '/TEST'
-MQTT_INTERVAL_TOPIC = '/INTERVAL_TEST'
+MQTT_INTERVAL_TOPIC = '/EPIWALK/interval'
 
 # Interval settings
 MQTT_INTERVAL_MINUTES = int(os.getenv('MQTT_INTERVAL_MINUTES', 5))
@@ -195,48 +195,52 @@ def get_age_gender_data_from_db():
     }
     
 def send_interval_mqtt_data():
-    """Send interval data via MQTT (every 5 minutes and at 23:59)"""
-    global mqtt_client, last_mqtt_send, last_daily_send, interval_person_in, interval_person_out
+    """Send interval data via MQTT from person_interval with retry and mark status true"""
+    global mqtt_client, last_mqtt_send, last_daily_send
     
     if mqtt_client is None:
         logging.warning("MQTT client not initialized, skipping interval data")
         return
     
     try:
+        # Ensure table and an open row exists
+        ensure_person_interval_table()
+        get_or_create_open_interval_row()
+
         current_time = datetime.datetime.now(local_tz)
-        
-        # Create payload with current interval counts (not total)
+        interval_in, interval_out = fetch_current_interval_counts()
+
         payload = {
-            "record_id": record_id,
             "device_id": device_id,
             "device_code": device_code,
             "device_name": device_name,
             "timestamp": current_time.isoformat(),
             "event": "interval_data",
             "data": {
-                "interval_in": interval_person_in,  # Current interval count
-                "interval_out": interval_person_out,  # Current interval count
-                "total_in": person_in,  # Keep total for reference
-                "total_out": person_out,  # Keep total for reference
-                "net_count": person_in - person_out,
-                "interval_net": interval_person_in - interval_person_out,  # Net for this interval
+                "interval_in": interval_in,
+                "interval_out": interval_out,
                 "interval_minutes": MQTT_INTERVAL_MINUTES
             }
         }
-        
-        # Send to MQTT
-        result = mqtt_client.publish(MQTT_INTERVAL_TOPIC, json.dumps(payload), qos=1)
-        
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            logging.info(f"Interval data sent via MQTT - Interval IN: {interval_person_in}, Interval OUT: {interval_person_out}, Total IN: {person_in}, Total OUT: {person_out}")
-            last_mqtt_send = current_time
-            
-            # Reset interval counters after sending
-            interval_person_in = 0
-            interval_person_out = 0
-        else:
-            logging.error(f"Failed to send interval MQTT data, error code: {result.rc}")
-            
+
+        # Publish with retry every 2 seconds on failure
+        while True:
+            try:
+                result = mqtt_client.publish(MQTT_INTERVAL_TOPIC, json.dumps(payload), qos=1)
+                if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                    logging.info(f"Interval data sent via MQTT - Interval IN: {interval_in}, Interval OUT: {interval_out}")
+                    last_mqtt_send = current_time
+                    # Mark current row as sent and open a new row
+                    if interval_record_id:
+                        db_query("UPDATE person_interval SET status = TRUE WHERE id = %s", (interval_record_id,), commit=True)
+                        # open a new row for next interval
+                        get_or_create_open_interval_row()
+                    break
+                else:
+                    logging.error(f"Failed to send interval MQTT data, error code: {result.rc}. Retrying in 2s...")
+            except Exception as err:
+                logging.error(f"MQTT publish error: {err}. Retrying in 2s...")
+            time.sleep(2)
     except Exception as e:
         logging.error(f"Error sending interval MQTT data: {e}")
 
@@ -319,6 +323,77 @@ if not cursor:
     logging.error("Fatal: Error on Connecting DB at Start Up")
     exit(1)
 logging.info("Successfully connected to PostgreSQL database")
+
+def ensure_person_interval_table():
+    """Create person_interval table if it does not exist"""
+    create_sql = (
+        """
+        CREATE TABLE IF NOT EXISTS person_interval (
+            id UUID PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            person_in INT4 NOT NULL DEFAULT 0,
+            person_out INT4 NOT NULL DEFAULT 0,
+            status BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+    )
+    db_query(create_sql, commit=True)
+
+def get_or_create_open_interval_row():
+    """Fetch an open (status=false) interval row for this device, or create one"""
+    global interval_record_id
+    row = db_fetch(
+        "SELECT id FROM person_interval WHERE device_id = %s AND status = FALSE ORDER BY created_at DESC LIMIT 1",
+        (device_id,)
+    )
+    if row and row[0]:
+        interval_record_id = row[0]
+        return interval_record_id
+
+    new_id = str(uuid.uuid4())
+    ok = db_query(
+        "INSERT INTO person_interval (id, device_id, person_in, person_out, status) VALUES (%s, %s, %s, %s, %s)",
+        (new_id, device_id, 0, 0, False), commit=True
+    )
+    if ok:
+        interval_record_id = new_id
+        return interval_record_id
+    logging.error("Failed to create open interval row")
+    return None
+
+def increment_interval_count(direction: str):
+    """Increment person_in or person_out in current open interval row"""
+    global interval_record_id
+    if not interval_record_id:
+        get_or_create_open_interval_row()
+    if not interval_record_id:
+        return
+    if direction == 'in':
+        db_query(
+            "UPDATE person_interval SET person_in = person_in + 1 WHERE id = %s",
+            (interval_record_id,), commit=True
+        )
+    elif direction == 'out':
+        db_query(
+            "UPDATE person_interval SET person_out = person_out + 1 WHERE id = %s",
+            (interval_record_id,), commit=True
+        )
+
+def fetch_current_interval_counts():
+    """Return current open interval counts (in, out) for payload"""
+    global interval_record_id
+    if not interval_record_id:
+        get_or_create_open_interval_row()
+    if not interval_record_id:
+        return 0, 0
+    row = db_fetch(
+        "SELECT person_in, person_out FROM person_interval WHERE id = %s",
+        (interval_record_id,)
+    )
+    if row:
+        return row[0] or 0, row[1] or 0
+    return 0, 0
 
 def should_reset():
     """Check if it's time to reset counters (midnight)"""
@@ -429,7 +504,11 @@ def initialize_counts():
     """Initialize counters from database or create new record"""
     global person_in, person_out, record_id, class_counts, interval_person_in, interval_person_out
     
-    # Initialize interval counters
+    # Initialize interval table and ensure an open interval row
+    ensure_person_interval_table()
+    get_or_create_open_interval_row()
+
+    # Initialize in-memory interval counters
     interval_person_in = 0
     interval_person_out = 0
     
@@ -673,7 +752,8 @@ def main():
                                     if state_in.get(track_id):
                                         global interval_person_in
                                         person_in += 1
-                                        interval_person_in += 1  # Add this line
+                                        interval_person_in += 1
+                                        increment_interval_count('in')
                                         class_counts['in'] = person_in
 
                                         # Update database
@@ -697,7 +777,8 @@ def main():
                                     if state_out.get(track_id):
                                         global interval_person_out
                                         person_out += 1
-                                        interval_person_out += 1  # Add this line
+                                        interval_person_out += 1
+                                        increment_interval_count('out')
                                         class_counts['out'] = person_out
 
                                         db_query(
