@@ -11,6 +11,7 @@ python -m pip install paddlepaddle-gpu==3.1.1 -i https://pypi.tuna.tsinghua.edu.
 python -m pip install paddlepaddle==3.1.1 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ```
+or check this link for more installation for CUDA : https://www.paddlepaddle.org.cn/install/quick?docurl=/documentation/docs/zh/develop/install/pip/linux-pip.html
 
 - Confirm the paddle version
 python -c "import paddle; print(paddle.__version__)"
